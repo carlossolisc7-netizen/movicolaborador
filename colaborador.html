@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>UrbanMov — Movicolaborador</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
+body, html { width: 100%; height: 100%; overflow: hidden; background: #111; }
+
+.header {
+  position: fixed; top: 0; left: 0; right: 0; height: 56px;
+  background: linear-gradient(135deg, #002e5d, #ff5a00);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; z-index: 1000;
+}
+.header-logo { font-weight: 900; font-size: 17px; color: white; }
+.header-logo span { color: #ffb380; }
+.badge {
+  background: rgba(255,255,255,0.2); color: white;
+  font-size: 10px; font-weight: 700; padding: 3px 10px;
+  border-radius: 20px; letter-spacing: 1px;
+}
+
+#map { position: fixed; top: 56px; left: 0; right: 0; bottom: 220px; z-index: 1; }
+
+#panel {
+  position: fixed; bottom: 0; left: 0; right: 0; height: 220px;
+  background: white; border-radius: 20px 20px 0 0;
+  padding: 16px; z-index: 500;
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.15);
+}
+
+#estado {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #f0f4ff; color: #002e5d;
+  font-size: 12px; font-weight: 700; padding: 5px 12px;
+  border-radius: 20px; margin-bottom: 10px;
+}
+#dot { width: 8px; height: 8px; border-radius: 50%; background: #aaa; }
+#dot.activo { background: #00c853; animation: pulsar 1s infinite; }
+@keyframes pulsar { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+#input-ruta {
+  width: 100%; padding: 10px 14px; border: 2px solid #eee;
+  border-radius: 12px; font-size: 14px; font-weight: 600;
+  color: #002e5d; background: #f8f9ff; margin-bottom: 10px;
+}
+#input-ruta:focus { outline: none; border-color: #ff5a00; }
+
+#stats {
+  display: none; grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px; margin-bottom: 10px;
+}
+#stats.visible { display: grid; }
+.stat { background: #f8f9ff; border-radius: 10px; padding: 8px; text-align: center; }
+.stat-n { font-size: 16px; font-weight: 900; color: #002e5d; }
+.stat-l { font-size: 10px; color: #aaa; font-weight: 600; }
+
+#btn {
+  width: 100%; padding: 14px; border: none; border-radius: 12px;
+  font-size: 15px; font-weight: 800; cursor: pointer;
+  background: linear-gradient(135deg, #002e5d, #ff5a00);
+  color: white;
+}
+#btn.grabando { background: linear-gradient(135deg, #c62828, #e53935); }
+
+#toast {
+  position: fixed; bottom: 230px; left: 50%; transform: translateX(-50%);
+  background: #002e5d; color: white; padding: 8px 18px;
+  border-radius: 20px; font-size: 13px; font-weight: 700;
+  z-index: 999; opacity: 0; transition: opacity 0.3s;
+  white-space: nowrap; pointer-events: none;
+}
+#toast.show { opacity: 1; }
+
+@keyframes pulsarMapa {
+  0% { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-logo">Urban<span>Mov</span></div>
+  <div class="badge">MOVICOLABORADOR</div>
+</div>
+
+<div id="map"></div>
+
+<div id="panel">
+  <div id="estado"><div id="dot"></div><span id="estado-txt">Sin rastreo activo</span></div>
+  <div id="stats">
+    <div class="stat"><div class="stat-n" id="s-pts">0</div><div class="stat-l">Puntos</div></div>
+    <div class="stat"><div class="stat-n" id="s-dist">0m</div><div class="stat-l">Distancia</div></div>
+    <div class="stat"><div class="stat-n" id="s-time">0:00</div><div class="stat-l">Tiempo</div></div>
+  </div>
+  <input id="input-ruta" type="text" placeholder="Escribe el nombre de la ruta (ej: Ruta 68B)">
+  <button id="btn" onclick="toggle()">Iniciar rastreo</button>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+let map, grabando = false;
+let puntos = [], linea = null, marker = null;
+let watchId = null, timer = null;
+let segundos = 0, distancia = 0, ultimoPunto = null;
+
+window.addEventListener('load', () => {
+  map = L.map('map', { zoomControl: true }).setView([19.0433, -98.2019], 14);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(pos => {
+      map.setView([pos.coords.latitude, pos.coords.longitude], 15);
+    }, err => {
+      toast('No se pudo obtener tu ubicación: ' + err.message);
+    });
+  }
+});
+
+function toggle() {
+  if (!grabando) iniciar();
+  else terminar();
+}
+
+function iniciar() {
+  const ruta = document.getElementById('input-ruta').value.trim();
+  if (!ruta) { toast('Escribe el nombre de la ruta primero'); return; }
+
+  grabando = true;
+  puntos = []; distancia = 0; ultimoPunto = null; segundos = 0;
+
+  document.getElementById('btn').textContent = 'Detener rastreo';
+  document.getElementById('btn').classList.add('grabando');
+  document.getElementById('dot').classList.add('activo');
+  document.getElementById('estado-txt').textContent = 'Rastreando...';
+  document.getElementById('stats').classList.add('visible');
+  document.getElementById('input-ruta').disabled = true;
+
+  timer = setInterval(() => {
+    segundos++;
+    const m = Math.floor(segundos/60);
+    const s = segundos % 60;
+    document.getElementById('s-time').textContent = `${m}:${s.toString().padStart(2,'0')}`;
+  }, 1000);
+
+  watchId = navigator.geolocation.watchPosition(pos => {
+    const lat = pos.coords.latitude;
+    const lng = pos.coords.longitude;
+    const acc = pos.coords.accuracy;
+
+    if (acc > 50) return;
+
+    if (ultimoPunto) {
+      const d = calcDist(ultimoPunto[0], ultimoPunto[1], lat, lng);
+      if (d > 150) return;
+      distancia += d;
+      document.getElementById('s-dist').textContent = distancia >= 1000
+        ? (distancia/1000).toFixed(1) + 'km'
+        : Math.round(distancia) + 'm';
+    }
+
+    ultimoPunto = [lat, lng];
+    puntos.push([lat, lng]);
+    document.getElementById('s-pts').textContent = puntos.length;
+
+    if (linea) map.removeLayer(linea);
+    if (puntos.length > 1) {
+      linea = L.polyline(puntos, { color: '#ff5a00', weight: 5, opacity: 0.9 }).addTo(map);
+    }
+
+    if (marker) {
+      marker.setLatLng([lat, lng]);
+    } else {
+      const icon = L.divIcon({
+        className: '',
+        html: `<div style="position:relative;width:20px;height:20px;">
+          <div style="position:absolute;width:20px;height:20px;border-radius:50%;background:rgba(255,90,0,0.25);animation:pulsarMapa 1.5s infinite;"></div>
+          <div style="position:absolute;top:4px;left:4px;width:12px;height:12px;border-radius:50%;background:#ff5a00;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.4);"></div>
+        </div>`,
+        iconSize: [20,20], iconAnchor: [10,10]
+      });
+      marker = L.marker([lat, lng], { icon }).addTo(map);
+    }
+    map.panTo([lat, lng]);
+
+  }, err => {
+    toast('GPS no disponible: ' + err.message);
+  }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 });
+
+  toast('Rastreo iniciado');
+}
+
+function terminar() {
+  if (puntos.length < 5) {
+    toast('Recorrido muy corto');
+    return;
+  }
+
+  grabando = false;
+  clearInterval(timer);
+  navigator.geolocation.clearWatch(watchId);
+
+  const ruta = document.getElementById('input-ruta').value.trim();
+  const fecha = new Date().toISOString().slice(0,10);
+  const hora = new Date().toLocaleTimeString('es-MX', { hour:'2-digit', minute:'2-digit' });
+
+  // Guardar JSON localmente
+  const datos = {
+    ruta: ruta,
+    fecha: fecha,
+    hora: hora,
+    puntos: puntos.length,
+    distancia_m: Math.round(distancia),
+    coords: puntos
+  };
+
+  const blob = new Blob([JSON.stringify(datos, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `urbanmov_${ruta.replace(/\s/g,'_')}_${fecha}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+
+  // Reset UI
+  document.getElementById('btn').textContent = 'Iniciar rastreo';
+  document.getElementById('btn').classList.remove('grabando');
+  document.getElementById('dot').classList.remove('activo');
+  document.getElementById('estado-txt').textContent = 'Rastreo completado';
+  document.getElementById('stats').classList.remove('visible');
+  document.getElementById('input-ruta').disabled = false;
+  document.getElementById('s-pts').textContent = '0';
+  document.getElementById('s-dist').textContent = '0m';
+  document.getElementById('s-time').textContent = '0:00';
+
+  toast(`Ruta guardada — ${puntos.length} puntos`);
+
+  setTimeout(() => {
+    document.getElementById('estado-txt').textContent = 'Sin rastreo activo';
+    if (linea) { map.removeLayer(linea); linea = null; }
+    if (marker) { map.removeLayer(marker); marker = null; }
+    puntos = [];
+  }, 4000);
+}
+
+function calcDist(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const dLat = (lat2-lat1)*Math.PI/180;
+  const dLng = (lng2-lng1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+</script>
+</body>
+</html>
